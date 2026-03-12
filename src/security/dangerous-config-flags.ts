@@ -24,6 +24,12 @@ export function collectEnabledInsecureOrDangerousFlags(cfg: OpenClawConfig): str
   if (cfg.tools?.exec?.applyPatch?.workspaceOnly === false) {
     enabledFlags.push("tools.exec.applyPatch.workspaceOnly=false");
   }
+  // [HARDENED] sandbox off — skills/sub-agents run with full host access.
+  if (!cfg.agents?.defaults?.sandbox?.mode || cfg.agents.defaults.sandbox.mode === "off") {
+    enabledFlags.push(
+      "agents.defaults.sandbox.mode=off (skills run on host without isolation — enable Docker sandbox)",
+    );
+  }
   // [HARDENED] mode=none disables authentication entirely — flag as dangerous.
   if (cfg.gateway?.auth?.mode === "none") {
     enabledFlags.push("gateway.auth.mode=none (authentication fully disabled)");
