@@ -463,6 +463,16 @@ function loadSkillEntries(
     : [];
   const extraSkills = mergedExtraDirs.flatMap((dir) => {
     const resolved = resolveUserPath(dir);
+    // R3: restreindre les extraDirs aux sous-chemins du workspaceDir ou du CONFIG_DIR
+    // pour éviter qu'un attaquant contrôlant la config charge des skills depuis
+    // un chemin arbitraire de l'hôte.
+    const isAllowed = isPathInside(workspaceDir, resolved) || isPathInside(CONFIG_DIR, resolved);
+    if (!isAllowed) {
+      skillsLogger.warn(
+        `extraDirs: chemin non autorisé ignoré (hors workspaceDir et CONFIG_DIR): ${resolved}`,
+      );
+      return [];
+    }
     return loadSkills({
       dir: resolved,
       source: "openclaw-extra",
