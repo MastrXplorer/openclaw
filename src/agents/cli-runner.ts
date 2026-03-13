@@ -5,6 +5,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
+import { sanitizeHostExecEnv } from "../infra/host-env-security.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getProcessSupervisor } from "../process/supervisor/index.js";
@@ -286,7 +287,13 @@ export async function runCliAgent(params: {
         }
 
         const env = (() => {
-          const next = { ...process.env, ...backend.env };
+          // R5: assainir l'env hôte avant de le passer au sous-processus CLI.
+          // sanitizeHostExecEnv filtre les variables dangereuses de process.env
+          // et applique backend.env comme overrides sécurisés (PATH non modifiable).
+          const next = sanitizeHostExecEnv({
+            baseEnv: process.env,
+            overrides: backend.env,
+          });
           for (const key of backend.clearEnv ?? []) {
             delete next[key];
           }
