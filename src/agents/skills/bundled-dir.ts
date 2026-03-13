@@ -36,9 +36,24 @@ export type BundledSkillsResolveOptions = {
 export function resolveBundledSkillsDir(
   opts: BundledSkillsResolveOptions = {},
 ): string | undefined {
-  const override = process.env.OPENCLAW_BUNDLED_SKILLS_DIR?.trim();
-  if (override) {
-    return override;
+  const rawOverride = process.env.OPENCLAW_BUNDLED_SKILLS_DIR?.trim();
+  if (rawOverride !== undefined && rawOverride !== "") {
+    // Signal explicite : la variable est définie, on la valide avant usage.
+    if (!path.isAbsolute(rawOverride)) {
+      console.warn(
+        `[openclaw] OPENCLAW_BUNDLED_SKILLS_DIR ignoré : le chemin doit être absolu (valeur reçue : "${rawOverride}")`,
+      );
+    } else if (!fs.existsSync(rawOverride)) {
+      console.warn(
+        `[openclaw] OPENCLAW_BUNDLED_SKILLS_DIR ignoré : le chemin n'existe pas (valeur reçue : "${rawOverride}")`,
+      );
+    } else {
+      console.warn(
+        `[openclaw] OPENCLAW_BUNDLED_SKILLS_DIR : override non standard actif → "${rawOverride}"`,
+      );
+      return rawOverride;
+    }
+    // Fail-open : on continue avec la résolution automatique.
   }
 
   // bun --compile: ship a sibling `skills/` next to the executable.
