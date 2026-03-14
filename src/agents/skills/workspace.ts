@@ -151,6 +151,7 @@ function resolveSkillsLimits(config?: OpenClawConfig): ResolvedSkillsLimits {
 function listChildDirectories(dir: string): string[] {
   try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const resolvedDir = fs.realpathSync(dir);
     const dirs: string[] = [];
     for (const entry of entries) {
       if (entry.name.startsWith(".")) continue;
@@ -165,7 +166,6 @@ function listChildDirectories(dir: string): string[] {
           // R4: résoudre le realpath du symlink et vérifier qu'il reste dans dir
           // pour éviter qu'un lien symbolique ne permette de sortir de la racine.
           const realTarget = fs.realpathSync(fullPath);
-          const resolvedDir = fs.realpathSync(dir);
           if (
             fs.statSync(realTarget).isDirectory() &&
             (realTarget === resolvedDir || realTarget.startsWith(resolvedDir + path.sep))

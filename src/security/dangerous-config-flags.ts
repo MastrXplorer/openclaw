@@ -24,8 +24,8 @@ export function collectEnabledInsecureOrDangerousFlags(cfg: OpenClawConfig): str
   if (cfg.tools?.exec?.applyPatch?.workspaceOnly === false) {
     enabledFlags.push("tools.exec.applyPatch.workspaceOnly=false");
   }
-  // [HARDENED] sandbox off — skills/sub-agents run with full host access.
-  if (!cfg.agents?.defaults?.sandbox?.mode || cfg.agents.defaults.sandbox.mode === "off") {
+  // [HARDENED] sandbox explicitly set to off — skills/sub-agents run with full host access.
+  if (cfg.agents?.defaults?.sandbox?.mode === "off") {
     enabledFlags.push(
       "agents.defaults.sandbox.mode=off (skills run on host without isolation — enable Docker sandbox)",
     );
@@ -34,15 +34,14 @@ export function collectEnabledInsecureOrDangerousFlags(cfg: OpenClawConfig): str
   if (cfg.gateway?.auth?.mode === "none") {
     enabledFlags.push("gateway.auth.mode=none (authentication fully disabled)");
   }
-  // [HARDENED] trusted-proxy with an empty allowUsers list accepts ALL proxy users.
-  if (
-    cfg.gateway?.auth?.mode === "trusted-proxy" &&
-    Array.isArray(cfg.gateway?.auth?.trustedProxy?.allowUsers) &&
-    cfg.gateway.auth.trustedProxy.allowUsers.length === 0
-  ) {
-    enabledFlags.push(
-      "gateway.auth.trustedProxy.allowUsers=[] (all proxy-authenticated users accepted)",
-    );
+  // [HARDENED] trusted-proxy without allowUsers (undefined or []) accepts ALL proxy users.
+  if (cfg.gateway?.auth?.mode === "trusted-proxy") {
+    const allowUsers = cfg.gateway?.auth?.trustedProxy?.allowUsers;
+    if (!Array.isArray(allowUsers) || allowUsers.length === 0) {
+      enabledFlags.push(
+        "gateway.auth.trustedProxy.allowUsers not set (all proxy-authenticated users accepted)",
+      );
+    }
   }
   return enabledFlags;
 }
