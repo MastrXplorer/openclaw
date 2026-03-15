@@ -25,7 +25,9 @@ export function collectEnabledInsecureOrDangerousFlags(cfg: OpenClawConfig): str
     enabledFlags.push("tools.exec.applyPatch.workspaceOnly=false");
   }
   // [HARDENED] sandbox explicitly set to off — skills/sub-agents run with full host access.
-  if (cfg.agents?.defaults?.sandbox?.mode === "off") {
+  // Only flag when mode is explicitly "off", not when undefined/missing (default applies).
+  const sandboxMode = cfg.agents?.defaults?.sandbox?.mode;
+  if (sandboxMode !== undefined && sandboxMode === "off") {
     enabledFlags.push(
       "agents.defaults.sandbox.mode=off (skills run on host without isolation — enable Docker sandbox)",
     );
