@@ -372,7 +372,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     defaultRuntime.exit(1);
     return;
   }
-  const MIN_TOKEN_LENGTH = 16;
+  const MIN_TOKEN_LENGTH = 32;
   if (hasToken && trimmedToken.length < MIN_TOKEN_LENGTH) {
     defaultRuntime.error(
       [
