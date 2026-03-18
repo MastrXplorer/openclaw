@@ -220,6 +220,13 @@ export const ModelDefinitionSchema = z
     contextWindow: z.number().positive().optional(),
     maxTokens: z.number().positive().optional(),
     headers: z.record(z.string(), z.string()).optional(),
+    rateLimit: z
+      .object({
+        rpm: z.number().int().positive().optional(),
+        tpm: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
     compat: ModelCompatSchema,
   })
   .strict();
