@@ -474,6 +474,18 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     defaultRuntime.exit(1);
     return;
   }
+  const MIN_TOKEN_LENGTH = 32;
+  const trimmedToken = tokenValue?.trim() ?? "";
+  if (hasToken && trimmedToken.length < MIN_TOKEN_LENGTH) {
+    defaultRuntime.error(
+      [
+        `[HARDENED] Gateway token is too short (${trimmedToken.length} chars, minimum ${MIN_TOKEN_LENGTH}).`,
+        "Generate a strong token: openssl rand -hex 32",
+      ].join("\n"),
+    );
+    defaultRuntime.exit(1);
+    return;
+  }
   const tokenConfigured =
     hasToken ||
     hasConfiguredSecretInput(
