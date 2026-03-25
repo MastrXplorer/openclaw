@@ -5,9 +5,9 @@ import {
   ensureContextEnginesInitialized,
   resolveContextEngine,
 } from "../../context-engine/index.js";
-import { emitAgentPlanEvent } from "../../infra/agent-events.js";
-import { sleepWithAbort } from "../../infra/backoff.js";
-import { formatErrorMessage } from "../../infra/errors.js";
+import { computeBackoff, sleepWithAbort, type BackoffPolicy } from "../../infra/backoff.js";
+import { consumeModelRateLimit } from "../../infra/model-rate-limit.js";
+import { generateSecureToken } from "../../infra/secure-random.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { enqueueCommandInLane } from "../../process/command-queue.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
@@ -589,6 +589,31 @@ export async function runEmbeddedPiAgent(
           let resolvedStreamApiKey: string | undefined;
           if (!runtimeAuthState && apiKeyInfo) {
             resolvedStreamApiKey = (apiKeyInfo as ApiKeyInfo).apiKey;
+          }
+
+          // Proactive per-model rate limit throttling (configured via models.providers.*.models[].rateLimit)
+          const configuredProviderModels = params.config?.models?.providers?.[provider]?.models;
+          const configuredModelDef = Array.isArray(configuredProviderModels)
+            ? configuredProviderModels.find(
+                (m: { id?: string }) => m && typeof m === "object" && m.id === modelId,
+              )
+            : undefined;
+          const modelRateLimitCfg = (
+            configuredModelDef as { rateLimit?: { rpm?: number; tpm?: number } } | undefined
+          )?.rateLimit;
+          if (modelRateLimitCfg) {
+            const throttle = consumeModelRateLimit(
+              provider,
+              modelId,
+              modelRateLimitCfg,
+              lastRunPromptUsage?.input,
+            );
+            if (!throttle.allowed) {
+              log.warn(
+                `proactive rate-limit throttle for ${provider}/${modelId}: waiting ${throttle.retryAfterMs}ms`,
+              );
+              await sleepWithAbort(throttle.retryAfterMs, params.abortSignal);
+            }
           }
 
           const attempt = await runEmbeddedAttempt({

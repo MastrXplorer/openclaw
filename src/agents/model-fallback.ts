@@ -3,7 +3,7 @@ import {
   resolveAgentModelFallbackValues,
   resolveAgentModelPrimaryValue,
 } from "../config/model-input.js";
-import { formatErrorMessage } from "../infra/errors.js";
+import { sleepWithAbort } from "../infra/backoff.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { sanitizeForLog } from "../terminal/ansi.js";
@@ -629,6 +629,11 @@ function resolveCooldownDecision(params: {
   };
 }
 
+/** Maximum retries when all fallback candidates are rate-limited/overloaded. */
+const MAX_EXHAUSTION_RETRIES = 3;
+/** Linear backoff delays (ms) per exhaustion retry: 60s, 120s, 180s. */
+const EXHAUSTION_BACKOFF_MS = [60_000, 120_000, 180_000];
+
 export async function runWithModelFallback<T>(params: {
   cfg: OpenClawConfig | undefined;
   provider: string;
@@ -639,6 +644,8 @@ export async function runWithModelFallback<T>(params: {
   fallbacksOverride?: string[];
   run: ModelFallbackRunFn<T>;
   onError?: ModelFallbackErrorHandler;
+  /** Optional abort signal to cancel exhaustion waits. */
+  abortSignal?: AbortSignal;
 }): Promise<ModelFallbackRunResult<T>> {
   const candidates = resolveFallbackCandidates({
     cfg: params.cfg,
@@ -649,12 +656,16 @@ export async function runWithModelFallback<T>(params: {
   const authStore = params.cfg
     ? ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false })
     : null;
-  const attempts: FallbackAttempt[] = [];
+  let attempts: FallbackAttempt[] = [];
   let lastError: unknown;
   const cooldownProbeUsedProviders = new Set<string>();
 
   const hasFallbackCandidates = candidates.length > 1;
+  let exhaustionRetry = 0;
 
+  // Outer loop: retry the full candidate list when all fail with transient reasons.
+  // eslint-disable-next-line no-constant-condition
+  outer: while (true) {
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
     const isPrimary = i === 0;
@@ -888,6 +899,38 @@ export async function runWithModelFallback<T>(params: {
       });
     }
   }
+
+  // All candidates exhausted — check if all failures were transient (rate_limit/overloaded).
+  let allTransient = attempts.length > 0;
+  for (const attempt of attempts) {
+    if (
+      attempt.reason !== "rate_limit" &&
+      attempt.reason !== "overloaded" &&
+      attempt.reason !== "unknown"
+    ) {
+      allTransient = false;
+      break;
+    }
+  }
+
+  if (allTransient && exhaustionRetry < MAX_EXHAUSTION_RETRIES) {
+    const waitMs = EXHAUSTION_BACKOFF_MS[exhaustionRetry] ?? 180_000;
+    fallbackLog.warn(
+      `All ${candidates.length} model candidates rate-limited. ` +
+        `Waiting ${Math.round(waitMs / 1000)}s before retry ` +
+        `(attempt ${exhaustionRetry + 1}/${MAX_EXHAUSTION_RETRIES})...`,
+    );
+    await sleepWithAbort(waitMs, params.abortSignal);
+    exhaustionRetry += 1;
+    attempts = [];
+    lastError = undefined;
+    cooldownProbeUsedProviders.clear();
+    continue outer;
+  }
+
+  // Not transient or retries exhausted — throw.
+  break;
+  } // end outer while
 
   throwFallbackFailureSummary({
     attempts,
