@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "skills": {
+    "wordpress-publishing-skill-for-claude": {
+      "version": "0.1.0",
+      "installedAt": 1773536179241
+    },
+    "seo-content-writer": {
+      "version": "3.0.0",
+      "installedAt": 1773536281228
+    },
+    "secureclaw-skill": {
+      "version": "2.2.0",
+      "installedAt": 1773536801723
+    },
+    "clawsec": {
+      "version": "1.0.0",
+      "installedAt": 1773536803746
+    }
+  }
+}

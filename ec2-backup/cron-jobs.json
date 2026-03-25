@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "51836af2-9520-4eba-9ff3-1c53002f4ca6",
+      "agentId": "main",
+      "sessionKey": "agent:main:main",
+      "name": "💾 Backup GitHub — workspace quotidien",
+      "enabled": true,
+      "createdAtMs": 1774311154812,
+      "updatedAtMs": 1774476042952,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 23 * * *",
+        "tz": "Europe/Paris"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Fais un commit et push de l'état actuel du workspace vers GitHub. Commande : cd /home/ubuntu/.openclaw/workspace && git add -A && git diff --cached --quiet || git commit -m \"backup: $(date '+%Y-%m-%d') — sauvegarde quotidienne\" && git push origin main. Si rien à commiter, c'est OK. Confirme en quelques mots.",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "nextRunAtMs": 1774562400000,
+        "lastRunAtMs": 1774476000005,
+        "lastRunStatus": "ok",
+        "lastStatus": "ok",
+        "lastDurationMs": 42947,
+        "lastDelivered": false,
+        "lastDeliveryStatus": "not-delivered",
+        "consecutiveErrors": 0
+      }
+    }
+  ]
+}
