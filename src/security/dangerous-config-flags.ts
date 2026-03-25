@@ -46,15 +46,14 @@ export function collectEnabledInsecureOrDangerousFlags(cfg: OpenClawConfig): str
   if (cfg.gateway?.auth?.mode === "none") {
     enabledFlags.push("gateway.auth.mode=none (authentication fully disabled)");
   }
-  // [HARDENED] trusted-proxy with an empty allowUsers list accepts ALL proxy users.
-  if (
-    cfg.gateway?.auth?.mode === "trusted-proxy" &&
-    Array.isArray(cfg.gateway?.auth?.trustedProxy?.allowUsers) &&
-    cfg.gateway.auth.trustedProxy.allowUsers.length === 0
-  ) {
-    enabledFlags.push(
-      "gateway.auth.trustedProxy.allowUsers=[] (all proxy-authenticated users accepted)",
-    );
+  // [HARDENED] trusted-proxy without allowUsers (undefined or []) accepts ALL proxy users.
+  if (cfg.gateway?.auth?.mode === "trusted-proxy") {
+    const allowUsers = cfg.gateway?.auth?.trustedProxy?.allowUsers;
+    if (!Array.isArray(allowUsers) || allowUsers.length === 0) {
+      enabledFlags.push(
+        "gateway.auth.trustedProxy.allowUsers not set (all proxy-authenticated users accepted)",
+      );
+    }
   }
 
   const pluginEntries = cfg.plugins?.entries;

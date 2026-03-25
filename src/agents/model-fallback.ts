@@ -915,7 +915,7 @@ export async function runWithModelFallback<T>(params: {
 
   if (allTransient && exhaustionRetry < MAX_EXHAUSTION_RETRIES) {
     const waitMs = EXHAUSTION_BACKOFF_MS[exhaustionRetry] ?? 180_000;
-    fallbackLog.warn(
+    log.warn(
       `All ${candidates.length} model candidates rate-limited. ` +
         `Waiting ${Math.round(waitMs / 1000)}s before retry ` +
         `(attempt ${exhaustionRetry + 1}/${MAX_EXHAUSTION_RETRIES})...`,

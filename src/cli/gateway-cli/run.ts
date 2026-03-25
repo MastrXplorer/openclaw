@@ -463,7 +463,7 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     "your-token-here",
     "replace-me",
   ]);
-  if (hasToken && WEAK_TOKENS.has(tokenValue.trim())) {
+  if (hasToken && WEAK_TOKENS.has(tokenValue.trim().toLowerCase())) {
     defaultRuntime.error(
       [
         "[HARDENED] Gateway token is a known weak/placeholder value and has been rejected.",
