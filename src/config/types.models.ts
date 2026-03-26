@@ -46,6 +46,10 @@ export type ModelDefinitionConfig = {
   contextWindow: number;
   maxTokens: number;
   headers?: Record<string, string>;
+  rateLimit?: {
+    rpm?: number;
+    tpm?: number;
+  };
   compat?: ModelCompatConfig;
 };
 

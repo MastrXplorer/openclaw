@@ -3,6 +3,7 @@ import {
   resolveAgentModelFallbackValues,
   resolveAgentModelPrimaryValue,
 } from "../config/model-input.js";
+import { sleepWithAbort } from "../infra/backoff.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { sanitizeForLog } from "../terminal/ansi.js";
 import {
@@ -502,6 +503,11 @@ function resolveCooldownDecision(params: {
   };
 }
 
+/** Maximum retries when all fallback candidates are rate-limited/overloaded. */
+const MAX_EXHAUSTION_RETRIES = 3;
+/** Linear backoff delays (ms) per exhaustion retry: 60s, 120s, 180s. */
+const EXHAUSTION_BACKOFF_MS = [60_000, 120_000, 180_000];
+
 export async function runWithModelFallback<T>(params: {
   cfg: OpenClawConfig | undefined;
   provider: string;
@@ -512,6 +518,8 @@ export async function runWithModelFallback<T>(params: {
   fallbacksOverride?: string[];
   run: ModelFallbackRunFn<T>;
   onError?: ModelFallbackErrorHandler;
+  /** Optional abort signal to cancel exhaustion waits. */
+  abortSignal?: AbortSignal;
 }): Promise<ModelFallbackRunResult<T>> {
   const candidates = resolveFallbackCandidates({
     cfg: params.cfg,
@@ -522,91 +530,52 @@ export async function runWithModelFallback<T>(params: {
   const authStore = params.cfg
     ? ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false })
     : null;
-  const attempts: FallbackAttempt[] = [];
+  let attempts: FallbackAttempt[] = [];
   let lastError: unknown;
   const cooldownProbeUsedProviders = new Set<string>();
 
   const hasFallbackCandidates = candidates.length > 1;
+  let exhaustionRetry = 0;
 
-  for (let i = 0; i < candidates.length; i += 1) {
-    const candidate = candidates[i];
-    const isPrimary = i === 0;
-    const requestedModel =
-      params.provider === candidate.provider && params.model === candidate.model;
-    let runOptions: ModelFallbackRunOptions | undefined;
-    let attemptedDuringCooldown = false;
-    let transientProbeProviderForAttempt: string | null = null;
-    if (authStore) {
-      const profileIds = resolveAuthProfileOrder({
-        cfg: params.cfg,
-        store: authStore,
-        provider: candidate.provider,
-      });
-      const isAnyProfileAvailable = profileIds.some((id) => !isProfileInCooldown(authStore, id));
-
-      if (profileIds.length > 0 && !isAnyProfileAvailable) {
-        // All profiles for this provider are in cooldown.
-        const now = Date.now();
-        const probeThrottleKey = resolveProbeThrottleKey(candidate.provider, params.agentDir);
-        const decision = resolveCooldownDecision({
-          candidate,
-          isPrimary,
-          requestedModel,
-          hasFallbackCandidates,
-          now,
-          probeThrottleKey,
-          authStore,
-          profileIds,
+  // Outer loop: retry the full candidate list when all fail with transient reasons.
+  // eslint-disable-next-line no-constant-condition
+  outer: while (true) {
+    for (let i = 0; i < candidates.length; i += 1) {
+      const candidate = candidates[i];
+      const isPrimary = i === 0;
+      const requestedModel =
+        params.provider === candidate.provider && params.model === candidate.model;
+      let runOptions: ModelFallbackRunOptions | undefined;
+      let attemptedDuringCooldown = false;
+      let transientProbeProviderForAttempt: string | null = null;
+      if (authStore) {
+        const profileIds = resolveAuthProfileOrder({
+          cfg: params.cfg,
+          store: authStore,
+          provider: candidate.provider,
         });
+        const isAnyProfileAvailable = profileIds.some((id) => !isProfileInCooldown(authStore, id));
 
-        if (decision.type === "skip") {
-          attempts.push({
-            provider: candidate.provider,
-            model: candidate.model,
-            error: decision.error,
-            reason: decision.reason,
-          });
-          logModelFallbackDecision({
-            decision: "skip_candidate",
-            runId: params.runId,
-            requestedProvider: params.provider,
-            requestedModel: params.model,
+        if (profileIds.length > 0 && !isAnyProfileAvailable) {
+          // All profiles for this provider are in cooldown.
+          const now = Date.now();
+          const probeThrottleKey = resolveProbeThrottleKey(candidate.provider, params.agentDir);
+          const decision = resolveCooldownDecision({
             candidate,
-            attempt: i + 1,
-            total: candidates.length,
-            reason: decision.reason,
-            error: decision.error,
-            nextCandidate: candidates[i + 1],
             isPrimary,
-            requestedModelMatched: requestedModel,
-            fallbackConfigured: hasFallbackCandidates,
-            profileCount: profileIds.length,
+            requestedModel,
+            hasFallbackCandidates,
+            now,
+            probeThrottleKey,
+            authStore,
+            profileIds,
           });
-          continue;
-        }
 
-        if (decision.markProbe) {
-          markProbeAttempt(now, probeThrottleKey);
-        }
-        if (
-          decision.reason === "rate_limit" ||
-          decision.reason === "overloaded" ||
-          decision.reason === "billing" ||
-          decision.reason === "unknown"
-        ) {
-          // Probe at most once per provider per fallback run when all profiles
-          // are cooldowned. Re-probing every same-provider candidate can stall
-          // cross-provider fallback on providers with long internal retries.
-          const isTransientCooldownReason =
-            decision.reason === "rate_limit" ||
-            decision.reason === "overloaded" ||
-            decision.reason === "unknown";
-          if (isTransientCooldownReason && cooldownProbeUsedProviders.has(candidate.provider)) {
-            const error = `Provider ${candidate.provider} is in cooldown (probe already attempted this run)`;
+          if (decision.type === "skip") {
             attempts.push({
               provider: candidate.provider,
               model: candidate.model,
-              error,
+              error: decision.error,
               reason: decision.reason,
             });
             logModelFallbackDecision({
@@ -618,7 +587,7 @@ export async function runWithModelFallback<T>(params: {
               attempt: i + 1,
               total: candidates.length,
               reason: decision.reason,
-              error,
+              error: decision.error,
               nextCandidate: candidates[i + 1],
               isPrimary,
               requestedModelMatched: requestedModel,
@@ -627,145 +596,210 @@ export async function runWithModelFallback<T>(params: {
             });
             continue;
           }
-          runOptions = { allowTransientCooldownProbe: true };
-          if (isTransientCooldownReason) {
-            transientProbeProviderForAttempt = candidate.provider;
+
+          if (decision.markProbe) {
+            markProbeAttempt(now, probeThrottleKey);
+          }
+          if (
+            decision.reason === "rate_limit" ||
+            decision.reason === "overloaded" ||
+            decision.reason === "billing" ||
+            decision.reason === "unknown"
+          ) {
+            // Probe at most once per provider per fallback run when all profiles
+            // are cooldowned. Re-probing every same-provider candidate can stall
+            // cross-provider fallback on providers with long internal retries.
+            const isTransientCooldownReason =
+              decision.reason === "rate_limit" ||
+              decision.reason === "overloaded" ||
+              decision.reason === "unknown";
+            if (isTransientCooldownReason && cooldownProbeUsedProviders.has(candidate.provider)) {
+              const error = `Provider ${candidate.provider} is in cooldown (probe already attempted this run)`;
+              attempts.push({
+                provider: candidate.provider,
+                model: candidate.model,
+                error,
+                reason: decision.reason,
+              });
+              logModelFallbackDecision({
+                decision: "skip_candidate",
+                runId: params.runId,
+                requestedProvider: params.provider,
+                requestedModel: params.model,
+                candidate,
+                attempt: i + 1,
+                total: candidates.length,
+                reason: decision.reason,
+                error,
+                nextCandidate: candidates[i + 1],
+                isPrimary,
+                requestedModelMatched: requestedModel,
+                fallbackConfigured: hasFallbackCandidates,
+                profileCount: profileIds.length,
+              });
+              continue;
+            }
+            runOptions = { allowTransientCooldownProbe: true };
+            if (isTransientCooldownReason) {
+              transientProbeProviderForAttempt = candidate.provider;
+            }
+          }
+          attemptedDuringCooldown = true;
+          logModelFallbackDecision({
+            decision: "probe_cooldown_candidate",
+            runId: params.runId,
+            requestedProvider: params.provider,
+            requestedModel: params.model,
+            candidate,
+            attempt: i + 1,
+            total: candidates.length,
+            reason: decision.reason,
+            nextCandidate: candidates[i + 1],
+            isPrimary,
+            requestedModelMatched: requestedModel,
+            fallbackConfigured: hasFallbackCandidates,
+            allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
+            profileCount: profileIds.length,
+          });
+        }
+      }
+
+      const attemptRun = await runFallbackAttempt({
+        run: params.run,
+        ...candidate,
+        attempts,
+        options: runOptions,
+      });
+      if ("success" in attemptRun) {
+        if (i > 0 || attempts.length > 0 || attemptedDuringCooldown) {
+          logModelFallbackDecision({
+            decision: "candidate_succeeded",
+            runId: params.runId,
+            requestedProvider: params.provider,
+            requestedModel: params.model,
+            candidate,
+            attempt: i + 1,
+            total: candidates.length,
+            previousAttempts: attempts,
+            isPrimary,
+            requestedModelMatched: requestedModel,
+            fallbackConfigured: hasFallbackCandidates,
+          });
+        }
+        const notFoundAttempt =
+          i > 0 ? attempts.find((a) => a.reason === "model_not_found") : undefined;
+        if (notFoundAttempt) {
+          log.warn(
+            `Model "${sanitizeForLog(notFoundAttempt.provider)}/${sanitizeForLog(notFoundAttempt.model)}" not found. Fell back to "${sanitizeForLog(candidate.provider)}/${sanitizeForLog(candidate.model)}".`,
+          );
+        }
+        return attemptRun.success;
+      }
+      const err = attemptRun.error;
+      {
+        if (transientProbeProviderForAttempt) {
+          const probeFailureReason = describeFailoverError(err).reason;
+          const shouldPreserveTransientProbeSlot =
+            probeFailureReason === "model_not_found" ||
+            probeFailureReason === "format" ||
+            probeFailureReason === "auth" ||
+            probeFailureReason === "auth_permanent" ||
+            probeFailureReason === "session_expired";
+          if (!shouldPreserveTransientProbeSlot) {
+            cooldownProbeUsedProviders.add(transientProbeProviderForAttempt);
           }
         }
-        attemptedDuringCooldown = true;
+        // Context overflow errors should be handled by the inner runner's
+        // compaction/retry logic, not by model fallback.  If one escapes as a
+        // throw, rethrow it immediately rather than trying a different model
+        // that may have a smaller context window and fail worse.
+        const errMessage = err instanceof Error ? err.message : String(err);
+        if (isLikelyContextOverflowError(errMessage)) {
+          throw err;
+        }
+        const normalized =
+          coerceToFailoverError(err, {
+            provider: candidate.provider,
+            model: candidate.model,
+          }) ?? err;
+
+        // Even unrecognized errors should not abort the fallback loop when
+        // there are remaining candidates.  Only abort/context-overflow errors
+        // (handled above) are truly non-retryable.
+        const isKnownFailover = isFailoverError(normalized);
+        if (!isKnownFailover && i === candidates.length - 1) {
+          throw err;
+        }
+
+        lastError = isKnownFailover ? normalized : err;
+        const described = describeFailoverError(normalized);
+        attempts.push({
+          provider: candidate.provider,
+          model: candidate.model,
+          error: described.message,
+          reason: described.reason ?? "unknown",
+          status: described.status,
+          code: described.code,
+        });
         logModelFallbackDecision({
-          decision: "probe_cooldown_candidate",
+          decision: "candidate_failed",
           runId: params.runId,
           requestedProvider: params.provider,
           requestedModel: params.model,
           candidate,
           attempt: i + 1,
           total: candidates.length,
-          reason: decision.reason,
+          reason: described.reason,
+          status: described.status,
+          code: described.code,
+          error: described.message,
           nextCandidate: candidates[i + 1],
           isPrimary,
           requestedModelMatched: requestedModel,
           fallbackConfigured: hasFallbackCandidates,
-          allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
-          profileCount: profileIds.length,
         });
-      }
-    }
-
-    const attemptRun = await runFallbackAttempt({
-      run: params.run,
-      ...candidate,
-      attempts,
-      options: runOptions,
-    });
-    if ("success" in attemptRun) {
-      if (i > 0 || attempts.length > 0 || attemptedDuringCooldown) {
-        logModelFallbackDecision({
-          decision: "candidate_succeeded",
-          runId: params.runId,
-          requestedProvider: params.provider,
-          requestedModel: params.model,
-          candidate,
-          attempt: i + 1,
-          total: candidates.length,
-          previousAttempts: attempts,
-          isPrimary,
-          requestedModelMatched: requestedModel,
-          fallbackConfigured: hasFallbackCandidates,
-        });
-      }
-      const notFoundAttempt =
-        i > 0 ? attempts.find((a) => a.reason === "model_not_found") : undefined;
-      if (notFoundAttempt) {
-        log.warn(
-          `Model "${sanitizeForLog(notFoundAttempt.provider)}/${sanitizeForLog(notFoundAttempt.model)}" not found. Fell back to "${sanitizeForLog(candidate.provider)}/${sanitizeForLog(candidate.model)}".`,
-        );
-      }
-      return attemptRun.success;
-    }
-    const err = attemptRun.error;
-    {
-      if (transientProbeProviderForAttempt) {
-        const probeFailureReason = describeFailoverError(err).reason;
-        const shouldPreserveTransientProbeSlot =
-          probeFailureReason === "model_not_found" ||
-          probeFailureReason === "format" ||
-          probeFailureReason === "auth" ||
-          probeFailureReason === "auth_permanent" ||
-          probeFailureReason === "session_expired";
-        if (!shouldPreserveTransientProbeSlot) {
-          cooldownProbeUsedProviders.add(transientProbeProviderForAttempt);
-        }
-      }
-      // Context overflow errors should be handled by the inner runner's
-      // compaction/retry logic, not by model fallback.  If one escapes as a
-      // throw, rethrow it immediately rather than trying a different model
-      // that may have a smaller context window and fail worse.
-      const errMessage = err instanceof Error ? err.message : String(err);
-      if (isLikelyContextOverflowError(errMessage)) {
-        throw err;
-      }
-      const normalized =
-        coerceToFailoverError(err, {
+        await params.onError?.({
           provider: candidate.provider,
           model: candidate.model,
-        }) ?? err;
-
-      // Even unrecognized errors should not abort the fallback loop when
-      // there are remaining candidates.  Only abort/context-overflow errors
-      // (handled above) are truly non-retryable.
-      const isKnownFailover = isFailoverError(normalized);
-      if (!isKnownFailover && i === candidates.length - 1) {
-        throw err;
+          error: isKnownFailover ? normalized : err,
+          attempt: i + 1,
+          total: candidates.length,
+        });
       }
-
-      lastError = isKnownFailover ? normalized : err;
-      const described = describeFailoverError(normalized);
-      attempts.push({
-        provider: candidate.provider,
-        model: candidate.model,
-        error: described.message,
-        reason: described.reason ?? "unknown",
-        status: described.status,
-        code: described.code,
-      });
-      logModelFallbackDecision({
-        decision: "candidate_failed",
-        runId: params.runId,
-        requestedProvider: params.provider,
-        requestedModel: params.model,
-        candidate,
-        attempt: i + 1,
-        total: candidates.length,
-        reason: described.reason,
-        status: described.status,
-        code: described.code,
-        error: described.message,
-        nextCandidate: candidates[i + 1],
-        isPrimary,
-        requestedModelMatched: requestedModel,
-        fallbackConfigured: hasFallbackCandidates,
-      });
-      await params.onError?.({
-        provider: candidate.provider,
-        model: candidate.model,
-        error: isKnownFailover ? normalized : err,
-        attempt: i + 1,
-        total: candidates.length,
-      });
     }
-  }
 
-  throwFallbackFailureSummary({
-    attempts,
-    candidates,
-    lastError,
-    label: "models",
-    formatAttempt: (attempt) =>
-      `${attempt.provider}/${attempt.model}: ${attempt.error}${
-        attempt.reason ? ` (${attempt.reason})` : ""
-      }`,
-  });
+    // All candidates exhausted for this round. Check if all failures are
+    // transient (rate_limit / overloaded) and retry after a cooldown wait.
+    const allTransient =
+      attempts.length > 0 &&
+      attempts.every((a) => a.reason === "rate_limit" || a.reason === "overloaded");
+
+    if (allTransient && exhaustionRetry < MAX_EXHAUSTION_RETRIES) {
+      const waitMs = EXHAUSTION_BACKOFF_MS[exhaustionRetry] ?? 180_000;
+      log.warn(
+        `All ${candidates.length} model candidates rate-limited. ` +
+          `Waiting ${Math.round(waitMs / 1000)}s before retry ` +
+          `(attempt ${exhaustionRetry + 1}/${MAX_EXHAUSTION_RETRIES})...`,
+      );
+      await sleepWithAbort(waitMs, params.abortSignal);
+      exhaustionRetry += 1;
+      attempts = [];
+      lastError = undefined;
+      cooldownProbeUsedProviders.clear();
+      continue outer;
+    }
+
+    throwFallbackFailureSummary({
+      attempts,
+      candidates,
+      lastError,
+      label: "models",
+      formatAttempt: (attempt) =>
+        `${attempt.provider}/${attempt.model}: ${attempt.error}${
+          attempt.reason ? ` (${attempt.reason})` : ""
+        }`,
+    });
+  } // end outer while
 }
 
 export async function runWithImageModelFallback<T>(params: {

@@ -1,9 +1,11 @@
+export type FixedWindowRateLimiterResult = {
+  allowed: boolean;
+  retryAfterMs: number;
+  remaining: number;
+};
+
 export type FixedWindowRateLimiter = {
-  consume: () => {
-    allowed: boolean;
-    retryAfterMs: number;
-    remaining: number;
-  };
+  consume: (amount?: number) => FixedWindowRateLimiterResult;
   reset: () => void;
 };
 
@@ -20,20 +22,21 @@ export function createFixedWindowRateLimiter(params: {
   let windowStartMs = 0;
 
   return {
-    consume() {
+    consume(amount = 1) {
       const nowMs = now();
       if (nowMs - windowStartMs >= windowMs) {
         windowStartMs = nowMs;
         count = 0;
       }
-      if (count >= maxRequests) {
+      const units = Math.max(1, Math.floor(amount));
+      if (count + units > maxRequests) {
         return {
           allowed: false,
           retryAfterMs: Math.max(0, windowStartMs + windowMs - nowMs),
-          remaining: 0,
+          remaining: Math.max(0, maxRequests - count),
         };
       }
-      count += 1;
+      count += units;
       return {
         allowed: true,
         retryAfterMs: 0,

@@ -20,6 +20,7 @@ type TargetOpts = {
   cdpUrl: string;
   targetId?: string;
 };
+
 const MAX_CLICK_DELAY_MS = 5_000;
 const MAX_WAIT_TIME_MS = 30_000;
 const MAX_BATCH_ACTIONS = 100;
@@ -98,7 +99,7 @@ export async function clickViaPlaywright(opts: {
     const delayMs = resolveBoundedDelayMs(opts.delayMs, "click delayMs", MAX_CLICK_DELAY_MS);
     if (delayMs > 0) {
       await locator.hover({ timeout });
-      await new Promise((r) => setTimeout(r, delayMs));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     if (opts.doubleClick) {
       await locator.dblclick({
@@ -844,7 +845,6 @@ async function executeSingleAction(
       });
       break;
     case "batch":
-      // Nested batches: delegate recursively
       await batchViaPlaywright({
         cdpUrl,
         targetId: effectiveTargetId,

@@ -152,7 +152,16 @@ function parseInstallSpec(input: unknown): SkillInstallSpec | undefined {
     spec.url = downloadUrl;
   }
   if (typeof raw.archive === "string") {
-    spec.archive = raw.archive;
+    // R7: allowlist stricte — seules les valeurs d'archive reconnues sont acceptées.
+    const VALID_ARCHIVE_TYPES = new Set(["zip", "tar.gz", "tar.bz2"]);
+    const archiveVal = raw.archive.trim().toLowerCase();
+    if (VALID_ARCHIVE_TYPES.has(archiveVal)) {
+      spec.archive = archiveVal;
+    } else {
+      console.warn(
+        `[hardened] frontmatter: champ 'archive' rejeté — valeur non reconnue: "${raw.archive.trim().slice(0, 60)}" (valides: ${[...VALID_ARCHIVE_TYPES].join(", ")})`,
+      );
+    }
   }
   if (typeof raw.extract === "boolean") {
     spec.extract = raw.extract;

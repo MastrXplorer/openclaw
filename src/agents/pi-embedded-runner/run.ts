@@ -6,6 +6,7 @@ import {
   resolveContextEngine,
 } from "../../context-engine/index.js";
 import { computeBackoff, sleepWithAbort, type BackoffPolicy } from "../../infra/backoff.js";
+import { consumeModelRateLimit } from "../../infra/model-rate-limit.js";
 import { generateSecureToken } from "../../infra/secure-random.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { PluginHookBeforeAgentStartResult } from "../../plugins/types.js";
@@ -30,6 +31,7 @@ import {
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
 import { FailoverError, resolveFailoverStatus } from "../failover-error.js";
 import {
+  applyLocalNoAuthHeaderOverride,
   ensureAuthProfileStore,
   getApiKeyForModel,
   resolveAuthProfileOrder,
@@ -848,6 +850,31 @@ export async function runEmbeddedPiAgent(
           const prompt =
             provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt;
 
+          // Proactive per-model rate limit throttling (configured via models.providers.*.models[].rateLimit)
+          const configuredProviderModels = params.config?.models?.providers?.[provider]?.models;
+          const configuredModelDef = Array.isArray(configuredProviderModels)
+            ? configuredProviderModels.find(
+                (m: { id?: string }) => m && typeof m === "object" && m.id === modelId,
+              )
+            : undefined;
+          const modelRateLimitCfg = (
+            configuredModelDef as { rateLimit?: { rpm?: number; tpm?: number } } | undefined
+          )?.rateLimit;
+          if (modelRateLimitCfg) {
+            const throttle = consumeModelRateLimit(
+              provider,
+              modelId,
+              modelRateLimitCfg,
+              lastRunPromptUsage?.input,
+            );
+            if (!throttle.allowed) {
+              log.warn(
+                `proactive rate-limit throttle for ${provider}/${modelId}: waiting ${throttle.retryAfterMs}ms`,
+              );
+              await sleepWithAbort(throttle.retryAfterMs, params.abortSignal);
+            }
+          }
+
           const attempt = await runEmbeddedAttempt({
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
@@ -884,7 +911,7 @@ export async function runEmbeddedPiAgent(
             disableTools: params.disableTools,
             provider,
             modelId,
-            model: effectiveModel,
+            model: applyLocalNoAuthHeaderOverride(effectiveModel, apiKeyInfo),
             authProfileId: lastProfileId,
             authProfileIdSource: lockedProfileId ? "user" : "auto",
             authStorage,
@@ -1443,6 +1470,48 @@ export async function runEmbeddedPiAgent(
 
             if (fallbackConfigured) {
               await maybeBackoffBeforeOverloadFailover(assistantFailoverReason);
+
+              // Best-effort compaction before fallback: shrink the session so the
+              // fallback model receives fewer tokens (reduces rate-limit cascade).
+              if (rateLimitFailure) {
+                try {
+                  await contextEngine.compact({
+                    sessionId: params.sessionId,
+                    sessionKey: params.sessionKey,
+                    sessionFile: params.sessionFile,
+                    tokenBudget: ctxInfo.tokens,
+                    force: true,
+                    compactionTarget: "budget",
+                    runtimeContext: {
+                      sessionKey: params.sessionKey,
+                      messageChannel: params.messageChannel,
+                      messageProvider: params.messageProvider,
+                      agentAccountId: params.agentAccountId,
+                      authProfileId: lastProfileId,
+                      workspaceDir: resolvedWorkspace,
+                      agentDir,
+                      config: params.config,
+                      skillsSnapshot: params.skillsSnapshot,
+                      senderIsOwner: params.senderIsOwner,
+                      provider,
+                      model: modelId,
+                      runId: params.runId,
+                      thinkLevel,
+                      reasoningLevel: params.reasoningLevel,
+                      bashElevated: params.bashElevated,
+                      extraSystemPrompt: params.extraSystemPrompt,
+                      ownerNumbers: params.ownerNumbers,
+                      trigger: "manual",
+                    },
+                  });
+                  log.info(`pre-fallback compaction succeeded for ${provider}/${modelId}`);
+                } catch (compactErr) {
+                  log.warn(
+                    `pre-fallback compaction failed for ${provider}/${modelId}: ${String(compactErr)}`,
+                  );
+                }
+              }
+
               // Prefer formatted error message (user-friendly) over raw errorMessage
               const message =
                 (lastAssistant

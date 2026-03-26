@@ -11,7 +11,9 @@ import {
 } from "../chrome-mcp.js";
 import type { BrowserActRequest, BrowserFormField } from "../client-actions-core.js";
 import { normalizeBrowserFormField } from "../form-fields.js";
+import { getBrowserProfileCapabilities } from "../profile-capabilities.js";
 import type { BrowserRouteContext } from "../server-context.js";
+import { matchBrowserUrlPattern } from "../url-pattern.js";
 import { registerBrowserAgentActDownloadRoutes } from "./agent.act.download.js";
 import { registerBrowserAgentActHookRoutes } from "./agent.act.hooks.js";
 import {
@@ -34,11 +36,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function browserEvaluateDisabledMessage(action: "wait" | "evaluate"): string {
+  return [
+    action === "wait"
+      ? "wait --fn is disabled by config (browser.evaluateEnabled=false)."
+      : "act:evaluate is disabled by config (browser.evaluateEnabled=false).",
+    "Docs: /gateway/configuration#browser-openclaw-managed-browser",
+  ].join("\n");
+}
+
 function buildExistingSessionWaitPredicate(params: {
   text?: string;
   textGone?: string;
   selector?: string;
-  url?: string;
   loadState?: "load" | "domcontentloaded" | "networkidle";
   fn?: string;
 }): string | null {
@@ -52,12 +62,9 @@ function buildExistingSessionWaitPredicate(params: {
   if (params.selector) {
     checks.push(`Boolean(document.querySelector(${JSON.stringify(params.selector)}))`);
   }
-  if (params.url) {
-    checks.push(`window.location.href === ${JSON.stringify(params.url)}`);
-  }
   if (params.loadState === "domcontentloaded") {
     checks.push(`document.readyState === "interactive" || document.readyState === "complete"`);
-  } else if (params.loadState === "load" || params.loadState === "networkidle") {
+  } else if (params.loadState === "load") {
     checks.push(`document.readyState === "complete"`);
   }
   if (params.fn) {
@@ -85,17 +92,30 @@ async function waitForExistingSessionCondition(params: {
     await sleep(params.timeMs);
   }
   const predicate = buildExistingSessionWaitPredicate(params);
-  if (!predicate) {
+  if (!predicate && !params.url) {
     return;
   }
   const timeoutMs = Math.max(250, params.timeoutMs ?? 10_000);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const ready = await evaluateChromeMcpScript({
-      profileName: params.profileName,
-      targetId: params.targetId,
-      fn: `async () => ${predicate}`,
-    });
+    let ready = true;
+    if (predicate) {
+      ready = Boolean(
+        await evaluateChromeMcpScript({
+          profileName: params.profileName,
+          targetId: params.targetId,
+          fn: `async () => ${predicate}`,
+        }),
+      );
+    }
+    if (ready && params.url) {
+      const currentUrl = await evaluateChromeMcpScript({
+        profileName: params.profileName,
+        targetId: params.targetId,
+        fn: "() => window.location.href",
+      });
+      ready = typeof currentUrl === "string" && matchBrowserUrlPattern(params.url, currentUrl);
+    }
     if (ready) {
       return;
     }
@@ -439,6 +459,17 @@ export function registerBrowserAgentActRoutes(
     if (Object.hasOwn(body, "selector") && !SELECTOR_ALLOWED_KINDS.has(kind)) {
       return jsonError(res, 400, SELECTOR_UNSUPPORTED_MESSAGE);
     }
+    const earlyFn = kind === "wait" || kind === "evaluate" ? toStringOrEmpty(body.fn) : "";
+    if (
+      (kind === "evaluate" || (kind === "wait" && earlyFn)) &&
+      !ctx.state().resolved.evaluateEnabled
+    ) {
+      return jsonError(
+        res,
+        403,
+        browserEvaluateDisabledMessage(kind === "evaluate" ? "evaluate" : "wait"),
+      );
+    }
 
     await withRouteTabContext({
       req,
@@ -447,7 +478,7 @@ export function registerBrowserAgentActRoutes(
       targetId,
       run: async ({ profileCtx, cdpUrl, tab }) => {
         const evaluateEnabled = ctx.state().resolved.evaluateEnabled;
-        const isExistingSession = profileCtx.profile.driver === "existing-session";
+        const isExistingSession = getBrowserProfileCapabilities(profileCtx.profile).usesChromeMcp;
         const profileName = profileCtx.profile.name;
 
         switch (kind) {
@@ -893,14 +924,7 @@ export function registerBrowserAgentActRoutes(
             const fn = toStringOrEmpty(body.fn) || undefined;
             const timeoutMs = toNumber(body.timeoutMs) ?? undefined;
             if (fn && !evaluateEnabled) {
-              return jsonError(
-                res,
-                403,
-                [
-                  "wait --fn is disabled by config (browser.evaluateEnabled=false).",
-                  "Docs: /gateway/configuration#browser-openclaw-managed-browser",
-                ].join("\n"),
-              );
+              return jsonError(res, 403, browserEvaluateDisabledMessage("wait"));
             }
             if (
               timeMs === undefined &&
@@ -918,6 +942,13 @@ export function registerBrowserAgentActRoutes(
               );
             }
             if (isExistingSession) {
+              if (loadState === "networkidle") {
+                return jsonError(
+                  res,
+                  501,
+                  "existing-session wait does not support loadState=networkidle yet.",
+                );
+              }
               await waitForExistingSessionCondition({
                 profileName,
                 targetId: tab.targetId,
@@ -952,14 +983,7 @@ export function registerBrowserAgentActRoutes(
           }
           case "evaluate": {
             if (!evaluateEnabled) {
-              return jsonError(
-                res,
-                403,
-                [
-                  "act:evaluate is disabled by config (browser.evaluateEnabled=false).",
-                  "Docs: /gateway/configuration#browser-openclaw-managed-browser",
-                ].join("\n"),
-              );
+              return jsonError(res, 403, browserEvaluateDisabledMessage("evaluate"));
             }
             const fn = toStringOrEmpty(body.fn);
             if (!fn) {
@@ -1043,6 +1067,9 @@ export function registerBrowserAgentActRoutes(
             if (!actions.length) {
               return jsonError(res, 400, "actions are required");
             }
+            if (countBatchActions(actions) > MAX_BATCH_ACTIONS) {
+              return jsonError(res, 400, `batch exceeds maximum of ${MAX_BATCH_ACTIONS} actions`);
+            }
             const targetIdError = validateBatchTargetIds(actions, tab.targetId);
             if (targetIdError) {
               return jsonError(res, 403, targetIdError);
@@ -1084,7 +1111,7 @@ export function registerBrowserAgentActRoutes(
       ctx,
       targetId,
       run: async ({ profileCtx, cdpUrl, tab }) => {
-        if (profileCtx.profile.driver === "existing-session") {
+        if (getBrowserProfileCapabilities(profileCtx.profile).usesChromeMcp) {
           return jsonError(
             res,
             501,
@@ -1121,7 +1148,7 @@ export function registerBrowserAgentActRoutes(
       ctx,
       targetId,
       run: async ({ profileCtx, cdpUrl, tab }) => {
-        if (profileCtx.profile.driver === "existing-session") {
+        if (getBrowserProfileCapabilities(profileCtx.profile).usesChromeMcp) {
           await evaluateChromeMcpScript({
             profileName: profileCtx.profile.name,
             targetId: tab.targetId,

@@ -251,7 +251,7 @@ export async function resolveGatewayBindHost(
     if (await canBindToHost("127.0.0.1")) {
       return "127.0.0.1";
     }
-    return "0.0.0.0"; // extreme fallback
+    throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
   }
 
   if (mode === "tailnet") {
@@ -262,34 +262,34 @@ export async function resolveGatewayBindHost(
     if (await canBindToHost("127.0.0.1")) {
       return "127.0.0.1";
     }
-    return "0.0.0.0";
+    throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
   }
 
   if (mode === "lan") {
-    return "0.0.0.0";
+    throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
   }
 
   if (mode === "custom") {
     const host = customHost?.trim();
     if (!host) {
-      return "0.0.0.0";
+      throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
     } // invalid config → fall back to all
 
     if (isValidIPv4(host) && (await canBindToHost(host))) {
       return host;
     }
     // Custom IP failed → fall back to LAN
-    return "0.0.0.0";
+    throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
   }
 
   if (mode === "auto") {
     if (await canBindToHost("127.0.0.1")) {
       return "127.0.0.1";
     }
-    return "0.0.0.0";
+    throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
   }
 
-  return "0.0.0.0";
+  throw new Error("[HARDENED] Cannot bind to 127.0.0.1 - refusing to fall back to 0.0.0.0");
 }
 
 /**

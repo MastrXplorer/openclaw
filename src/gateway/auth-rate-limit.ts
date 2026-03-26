@@ -96,7 +96,7 @@ export function createAuthRateLimiter(config?: RateLimitConfig): AuthRateLimiter
   const maxAttempts = config?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const windowMs = config?.windowMs ?? DEFAULT_WINDOW_MS;
   const lockoutMs = config?.lockoutMs ?? DEFAULT_LOCKOUT_MS;
-  const exemptLoopback = config?.exemptLoopback ?? true;
+  const exemptLoopback = config?.exemptLoopback ?? false;
   const pruneIntervalMs = config?.pruneIntervalMs ?? PRUNE_INTERVAL_MS;
 
   const entries = new Map<string, RateLimitEntry>();

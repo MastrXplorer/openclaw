@@ -400,8 +400,10 @@ export async function authorizeGatewayConnect(
   }
 
   if (auth.mode === "none") {
+    console.warn("[HARDENED] WARNING: gateway auth is disabled (mode=none). All connections are accepted without authentication.");
     return { ok: true, method: "none" };
   }
+
 
   const limiter = params.rateLimiter;
   const ip =

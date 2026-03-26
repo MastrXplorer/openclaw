@@ -371,9 +371,12 @@ export const OpenClawSchema = z
                 color: HexColorSchema,
               })
               .strict()
-              .refine((value) => value.cdpPort || value.cdpUrl, {
-                message: "Profile must set cdpPort or cdpUrl",
-              }),
+              .refine(
+                (value) => value.driver === "existing-session" || value.cdpPort || value.cdpUrl,
+                {
+                  message: "Profile must set cdpPort or cdpUrl",
+                },
+              ),
           )
           .optional(),
         extraArgs: z.array(z.string()).optional(),
@@ -674,7 +677,11 @@ export const OpenClawSchema = z
               .optional(),
             trustedProxy: z
               .object({
-                userHeader: z.string().min(1, "userHeader is required for trusted-proxy mode"),
+                userHeader: z
+                  .string()
+                  .min(1, "userHeader is required for trusted-proxy mode")
+                  // [HARDENED] reject whitespace-only values that would bypass min(1).
+                  .refine((v) => v.trim().length > 0, "userHeader cannot be only whitespace"),
                 requiredHeaders: z.array(z.string()).optional(),
                 allowUsers: z.array(z.string()).optional(),
               })
